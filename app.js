@@ -128,17 +128,34 @@ function expenseTitle(t) {
   return t.note ? `${catDisplay(t)} — ${t.note}` : catDisplay(t);
 }
 
-function item(t) {
+function item(t, grouped = false) {
   const label = t.type === 'expense' ? expenseTitle(t) : (t.person || types[t.type]);
-  const sub = datefmt(t.date) + (
-    t.type === 'debt'
-      ? ' · ' + (remain(t) === 0 ? 'Закрыт' : t.direction === 'given' ? 'Мне должны' : 'Я должен') + (t.due && remain(t) > 0 ? ' · до ' + datefmt(t.due) : '')
-      : t.type === 'expense' && rep(t)
-        ? ' · ' + (remain(t) === 0 ? 'Скомпенсировано' : 'Частично возмещено')
-        : ''
-  );
+  const status = t.type === 'debt'
+    ? (remain(t) === 0 ? 'Закрыт' : t.direction === 'given' ? 'Мне должны' : 'Я должен') + (t.due && remain(t) > 0 ? ' · до ' + datefmt(t.due) : '')
+    : t.type === 'expense' && rep(t)
+      ? (remain(t) === 0 ? 'Скомпенсировано' : 'Частично возмещено') : '';
+  const sub = [grouped === true ? '' : datefmt(t.date), status].filter(Boolean).join(' · ');
   const sign = t.type === 'expense' || (t.type === 'debt' && t.direction === 'given') ? '−' : '+';
-  return `<button class="item" data-detail="${esc(t.id)}"><span class="wrap"><strong>${esc(label)}</strong><small>${esc(sub)}</small></span><strong class="${sign === '+' ? 'positive' : ''}">${sign}${money(t.type === 'income' ? t.amount : remain(t))}</strong></button>`;
+  return `<button class="item" data-detail="${esc(t.id)}"><span class="wrap"><strong>${esc(label)}</strong>${sub ? `<small>${esc(sub)}</small>` : ''}</span><strong class="item-amount ${sign === '+' ? 'positive' : ''}">${sign}${money(t.type === 'income' ? t.amount : remain(t))}</strong></button>`;
+}
+
+function dayTitle(date) {
+  const options = { day: 'numeric', month: 'long' };
+  if (date.slice(0, 4) !== today().slice(0, 4)) options.year = 'numeric';
+  return new Intl.DateTimeFormat('ru-RU', options).format(new Date(date + 'T12:00:00'));
+}
+
+function dailyOperations(ts) {
+  if (!ts.length) return '<div class="card empty">Пока нет операций</div>';
+  const groups = new Map();
+  for (const t of ts) {
+    if (!groups.has(t.date)) groups.set(t.date, []);
+    groups.get(t.date).push(t);
+  }
+  return [...groups.entries()].sort(([a], [b]) => b.localeCompare(a)).map(([date, entries]) => {
+    const spent = entries.filter(t => t.type === 'expense').reduce((sum, t) => sum + remain(t), 0);
+    return `<section class="day-group"><div class="day-header"><h2>${esc(dayTitle(date))}</h2>${spent > 0 ? `<span class="day-total" aria-label="Расходы за день">−${money(spent)}</span>` : ''}</div><div class="card day-card">${entries.map(t => item(t, true)).join('')}</div></section>`;
+  }).join('');
 }
 
 function inPeriod(d) {
@@ -178,7 +195,7 @@ function render() {
 
   if (tab === 'home') {
     const { exp, comp, inc } = totals(d => d.slice(0, 7) === today().slice(0, 7));
-    main.innerHTML = `<h1>Финансы</h1><div class="card hero"><div class="muted">Чистые расходы за месяц</div><div class="total">${money(exp - comp)}</div><div class="positive">Доходы: ${money(inc)}</div></div><div class="grid"><div class="card"><small>Мне должны</small><h3>${money(sum('given'))}</h3></div><div class="card"><small>Я должен</small><h3>${money(sum('taken'))}</h3></div></div><button class="plus" data-add aria-label="Добавить операцию">+</button><h2>Последние операции</h2><div class="card">${ts.map(item).join('') || '<div class="empty">Пока нет операций</div>'}</div>`;
+    main.innerHTML = `<h1>Финансы</h1><div class="card hero"><div class="muted">Чистые расходы за месяц</div><div class="total">${money(exp - comp)}</div><div class="positive">Доходы: ${money(inc)}</div></div><div class="grid"><div class="card"><small>Мне должны</small><h3>${money(sum('given'))}</h3></div><div class="card"><small>Я должен</small><h3>${money(sum('taken'))}</h3></div></div><button class="plus" data-add aria-label="Добавить операцию">+</button>${dailyOperations(ts)}`;
   }
 
   if (tab === 'debts') {
