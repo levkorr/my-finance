@@ -58,6 +58,7 @@ function migrate(input) {
     due: typeof t.due === 'string' ? t.due : '',
     direction: typeof t.direction === 'string' ? t.direction : '',
     note: typeof t.note === 'string' ? t.note : '',
+    expectedCompensation: t.type === 'expense' && t.expectedCompensation === true,
     adjustments: Array.isArray(t.adjustments) ? t.adjustments.map(a => ({
       id: typeof a.id === 'string' && a.id ? a.id : uid(),
       amount: a.amount,
@@ -121,6 +122,7 @@ const catIcon = t => catObj(t)?.icon || '📁';
 const catDisplay = t => `${catIcon(t)} ${catName(t)}`;
 const rep = t => (t.adjustments || []).reduce((s, a) => s + a.amount, 0);
 const remain = t => t.amount - rep(t);
+const awaitingCompensation = t => t.type === 'expense' && t.expectedCompensation === true && remain(t) > 0;
 const types = { expense: 'Расход', debt: 'Долг', income: 'Доход' };
 const tabs = [['home', '⌂', 'Главная'], ['stats', '◔', 'Статистика'], ['debts', '♙', 'Долги'], ['settings', '⚙', 'Настройки']];
 
@@ -132,11 +134,14 @@ function item(t, grouped = false) {
   const label = t.type === 'expense' ? expenseTitle(t) : (t.person || types[t.type]);
   const status = t.type === 'debt'
     ? (remain(t) === 0 ? 'Закрыт' : t.direction === 'given' ? 'Мне должны' : 'Я должен') + (t.due && remain(t) > 0 ? ' · до ' + datefmt(t.due) : '')
-    : t.type === 'expense' && rep(t)
-      ? (remain(t) === 0 ? 'Скомпенсировано' : 'Частично возмещено') : '';
+    : awaitingCompensation(t)
+      ? (rep(t) ? 'Частично возмещено · Должны скомпенсировать' : 'Должны скомпенсировать')
+      : t.type === 'expense' && rep(t)
+        ? (remain(t) === 0 ? 'Скомпенсировано' : 'Частично возмещено') : '';
+  const compensated = t.type === 'expense' && rep(t) > 0 && remain(t) === 0;
   const sub = [grouped === true ? '' : datefmt(t.date), status].filter(Boolean).join(' · ');
   const sign = t.type === 'expense' || (t.type === 'debt' && t.direction === 'given') ? '−' : '+';
-  return `<button class="item" data-detail="${esc(t.id)}"><span class="wrap"><strong>${esc(label)}</strong>${sub ? `<small>${esc(sub)}</small>` : ''}</span><strong class="item-amount ${sign === '+' ? 'positive' : ''}">${sign}${money(t.type === 'income' ? t.amount : remain(t))}</strong></button>`;
+  return `<button class="item" data-detail="${esc(t.id)}"><span class="wrap"><strong>${esc(label)}</strong>${sub ? `<small class="${compensated ? 'positive' : ''}">${esc(sub)}</small>` : ''}</span><strong class="item-amount ${sign === '+' ? 'positive' : ''}">${sign}${money(t.type === 'income' ? t.amount : remain(t))}</strong></button>`;
 }
 
 function dayTitle(date) {
@@ -190,6 +195,8 @@ function categoryOption(c, selected) {
 function render() {
   const ts = [...state.transactions].sort((a, b) => b.date.localeCompare(a.date) || b.created - a.created);
   const debts = ts.filter(t => t.type === 'debt');
+  const pending = ts.filter(awaitingCompensation);
+  const pendingTotal = pending.reduce((s, t) => s + remain(t), 0);
   const sum = dir => debts.filter(t => t.direction === dir).reduce((s, t) => s + remain(t), 0);
   $('#nav').innerHTML = tabs.map(([id, i, n]) => `<button data-tab="${id}" class="${tab === id ? 'active' : ''}"><span>${i}</span>${n}</button>`).join('');
 
@@ -201,7 +208,7 @@ function render() {
   if (tab === 'debts') {
     main.innerHTML = `<div class="row"><h1>Долги</h1><button data-add="debt">+ Добавить</button></div>` +
       ['given', 'taken'].map(d => `<h2>${d === 'given' ? 'Мне должны' : 'Я должен'} · ${money(sum(d))}</h2><div class="card">${debts.filter(t => t.direction === d && remain(t) > 0).map(t => item(t) + (t.due && t.due < today() ? '<small class="negative">Срок истёк</small>' : '')).join('') || '<div class="empty">Нет открытых долгов</div>'}</div>`).join('') +
-      `<h2>Закрытые</h2><div class="card">${debts.filter(t => !remain(t)).map(item).join('') || '<div class="empty">Нет закрытых долгов</div>'}</div>`;
+      `<h2>Должны скомпенсировать · ${money(pendingTotal)}</h2><div class="card">${pending.map(t => item(t)).join('') || '<div class="empty">Нет ожидаемых компенсаций</div>'}</div><h2>Закрытые</h2><div class="card">${debts.filter(t => !remain(t)).map(item).join('') || '<div class="empty">Нет закрытых долгов</div>'}</div>`;
   }
 
   if (tab === 'stats') {
@@ -290,6 +297,7 @@ function form(t = null, start = 'expense') {
         due: type === 'debt' ? draft.due : '',
         direction: type === 'debt' ? draft.direction : '',
         note: draft.note.trim(),
+        expectedCompensation: type === 'expense' && t?.expectedCompensation === true,
         adjustments: t?.adjustments || []
       };
       if (await change(s => {
@@ -307,8 +315,20 @@ function detail(id) {
   const t = state.transactions.find(x => x.id === id);
   if (!t) return;
   const title = t.type === 'expense' ? expenseTitle(t) : (t.person || 'Доход');
-  show(`<div class="row"><h2>${esc(types[t.type])}</h2><button data-close>✕</button></div><div class="hero"><small>${esc(title)}</small><div class="total">${money(t.amount)}</div><small>${datefmt(t.date)}</small></div>${t.type === 'expense' ? `<p>Категория: <strong>${esc(catDisplay(t))}</strong></p>` : ''}${t.note && t.type !== 'expense' ? `<p class="wrap">${esc(t.note)}</p>` : ''}${t.type === 'debt' ? `<p>Срок возврата: ${datefmt(t.due)}</p><p>${t.direction === 'given' ? 'Мне должны' : 'Я должен'}</p>` : ''}${t.type !== 'income' ? `<p>Возвращено: ${money(rep(t))}</p><p><strong>Остаток: ${money(remain(t))}</strong></p>${(t.adjustments || []).map(a => `<div class="row"><small>${datefmt(a.date)} · ${money(a.amount)}</small><button data-undo="${esc(a.id)}">Отменить</button></div>`).join('')}${remain(t) ? `<button class="primary" data-full>${t.type === 'expense' ? 'Скомпенсировано' : 'Долг возвращён'}</button><button data-partial style="width:100%">Частичный возврат</button>` : ''}` : ''}<div class="actions"><button data-edit>Редактировать</button><button class="danger" data-delete>Удалить</button></div>`);
+  const pending = awaitingCompensation(t);
+  const compensationStatus = t.type === 'expense' && rep(t) > 0
+    ? `<p class="${remain(t) === 0 ? 'positive' : 'muted'}"><strong>${remain(t) === 0 ? 'Скомпенсировано' : 'Частично возмещено'}</strong></p>` : '';
+  const pendingControl = t.type === 'expense' && remain(t) > 0
+    ? `<div class="comp-expect">${pending ? `<p class="comp-pending">Ожидается компенсация: <strong>${money(remain(t))}</strong></p>` : ''}<button type="button" class="comp-toggle" data-expect aria-pressed="${pending}">${pending ? 'Отменить ожидание компенсации' : 'Должны скомпенсировать'}</button><small>Расход уменьшится только после фактического возврата денег.</small></div>` : '';
+  show(`<div class="row"><h2>${esc(types[t.type])}</h2><button data-close>✕</button></div><div class="hero"><small>${esc(title)}</small><div class="total">${money(t.amount)}</div><small>${datefmt(t.date)}</small></div>${t.type === 'expense' ? `<p>Категория: <strong>${esc(catDisplay(t))}</strong></p>` : ''}${t.note && t.type !== 'expense' ? `<p class="wrap">${esc(t.note)}</p>` : ''}${t.type === 'debt' ? `<p>Срок возврата: ${datefmt(t.due)}</p><p>${t.direction === 'given' ? 'Мне должны' : 'Я должен'}</p>` : ''}${compensationStatus}${pendingControl}${t.type !== 'income' ? `<p>Возвращено: ${money(rep(t))}</p><p><strong>Остаток: ${money(remain(t))}</strong></p>${(t.adjustments || []).map(a => `<div class="row"><small>${datefmt(a.date)} · ${money(a.amount)}</small><button data-undo="${esc(a.id)}">Отменить</button></div>`).join('')}${remain(t) ? `<button class="primary" data-full>${t.type === 'expense' ? 'Скомпенсировано' : 'Долг возвращён'}</button><button data-partial style="width:100%">Частичный возврат</button>` : ''}` : ''}<div class="actions"><button data-edit>Редактировать</button><button class="danger" data-delete>Удалить</button></div>`);
 
+  const expect = modal.querySelector('[data-expect]');
+  if (expect) expect.onclick = async () => {
+    if (await change(s => {
+      const target = s.transactions.find(x => x.id === id);
+      if (target && target.type === 'expense' && remain(target) > 0) target.expectedCompensation = !target.expectedCompensation;
+    })) detail(id);
+  };
   const full = modal.querySelector('[data-full]');
   if (full) full.onclick = () => adjust(t, true);
   const part = modal.querySelector('[data-partial]');
@@ -402,8 +422,8 @@ function download(name, content, mime) {
 
 function csv() {
   const q = v => '"' + String(v ?? '').replace(/^[=+@-]/, "'$&").replace(/"/g, '""') + '"';
-  const rows = [['Тип', 'Дата', 'Категория', 'Имя', 'Сумма', 'Возвращено', 'Остаток', 'Срок', 'Комментарий', 'Валюта']];
-  for (const t of state.transactions) rows.push([types[t.type], t.date, t.type === 'expense' ? catDisplay(t) : '', t.person, t.amount / 100, rep(t) / 100, remain(t) / 100, t.due, t.note, state.currency]);
+  const rows = [['Тип', 'Дата', 'Категория', 'Имя', 'Сумма', 'Возвращено', 'Остаток', 'Срок', 'Комментарий', 'Валюта', 'Ожидается компенсация']];
+  for (const t of state.transactions) rows.push([types[t.type], t.date, t.type === 'expense' ? catDisplay(t) : '', t.person, t.amount / 100, rep(t) / 100, remain(t) / 100, t.due, t.note, state.currency, awaitingCompensation(t) ? remain(t) / 100 : 0]);
   download('finance-' + today() + '.csv', '\ufeff' + rows.map(r => r.map(q).join(';')).join('\r\n'), 'text/csv;charset=utf-8');
 }
 
