@@ -124,7 +124,15 @@ const rep = t => (t.adjustments || []).reduce((s, a) => s + a.amount, 0);
 const remain = t => t.amount - rep(t);
 const awaitingCompensation = t => t.type === 'expense' && t.expectedCompensation === true && remain(t) > 0;
 const types = { expense: 'Расход', debt: 'Долг', income: 'Доход' };
-const tabs = [['home', '⌂', 'Главная'], ['stats', '◔', 'Статистика'], ['debts', '♙', 'Долги'], ['settings', '⚙', 'Настройки']];
+// Self-contained, matching 24px outline icons; no external assets.
+const outlineIcon = (paths, className = 'nav-icon') => `<svg class="${className}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
+const tabs = [
+  ['home', outlineIcon('<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>'), 'Главная'],
+  ['stats', outlineIcon('<path d="M12 3v9h9A9 9 0 0 0 12 3Z"/><path d="M8 4a9 9 0 1 0 12 12"/>'), 'Статистика'],
+  ['debts', outlineIcon('<circle cx="9" cy="7.5" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2H3zM16 4.6a3 3 0 0 1 0 5.8M18 13a5 5 0 0 1 3 4.6V20h-3"/>'), 'Долги'],
+  ['settings', outlineIcon('<path d="m10 3-.6 2.3-1.5.9-2.3-.6-2 3.5 1.7 1.7v1.8l-1.7 1.7 2 3.5 2.3-.6 1.5.9.6 2.9h4l.6-2.9 1.5-.9 2.3.6 2-3.5-1.7-1.7v-1.8l1.7-1.7-2-3.5-2.3.6-1.5-.9L14 3z"/><circle cx="12" cy="12" r="3"/>'), 'Настройки']
+];
+const plusIcon = outlineIcon('<path d="M12 5v14M5 12h14"/>', 'plus-icon');
 
 function expenseTitle(t) {
   return t.note ? `${catDisplay(t)} — ${t.note}` : catDisplay(t);
@@ -198,11 +206,11 @@ function render() {
   const pending = ts.filter(awaitingCompensation);
   const pendingTotal = pending.reduce((s, t) => s + remain(t), 0);
   const sum = dir => debts.filter(t => t.direction === dir).reduce((s, t) => s + remain(t), 0);
-  $('#nav').innerHTML = tabs.map(([id, i, n]) => `<button data-tab="${id}" class="${tab === id ? 'active' : ''}"><span>${i}</span>${n}</button>`).join('');
+  $('#nav').innerHTML = tabs.map(([id, i, n]) => `<button data-tab="${id}" class="${tab === id ? 'active' : ''}" ${tab === id ? 'aria-current="page"' : ''}>${i}<span>${n}</span></button>`).join('');
 
   if (tab === 'home') {
     const { exp, comp, inc } = totals(d => d.slice(0, 7) === today().slice(0, 7));
-    main.innerHTML = `<h1>Финансы</h1><div class="card hero"><div class="muted">Чистые расходы за месяц</div><div class="total">${money(exp - comp)}</div><div class="positive">Доходы: ${money(inc)}</div></div><div class="grid"><div class="card"><small>Мне должны</small><h3>${money(sum('given'))}</h3></div><div class="card"><small>Я должен</small><h3>${money(sum('taken'))}</h3></div></div><button class="plus" data-add aria-label="Добавить операцию">+</button>${dailyOperations(ts)}`;
+    main.innerHTML = `<h1>Финансы</h1><div class="card hero"><div class="muted">Чистые расходы за месяц</div><div class="total">${money(exp - comp)}</div><div class="positive">Доходы: ${money(inc)}</div></div><div class="grid"><div class="card"><small>Мне должны</small><h3>${money(sum('given'))}</h3></div><div class="card"><small>Я должен</small><h3>${money(sum('taken'))}</h3></div></div><button class="plus" data-add aria-label="Добавить операцию">${plusIcon}</button>${dailyOperations(ts)}`;
   }
 
   if (tab === 'debts') {
