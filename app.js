@@ -15,6 +15,19 @@ for (const name of ['touchstart', 'touchmove']) {
 }
 document.addEventListener('dblclick', preventPageZoom, { passive: false });
 
+// Suppress selection and long-press context menus outside editable controls.
+// Do not cancel touch or pointer events: scrolling, chart taps and swipes remain native.
+function allowTextEditing(target) {
+  const element = target instanceof Element ? target : target?.parentElement;
+  return Boolean(element && (element.isContentEditable || element.closest('input, textarea, select')));
+}
+for (const name of ['selectstart', 'contextmenu']) {
+  document.addEventListener(name, event => {
+    if (!allowTextEditing(event.target) && event.cancelable) event.preventDefault();
+  });
+}
+
+
 
 const $ = s => document.querySelector(s);
 const main = $('#main');
