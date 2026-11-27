@@ -236,7 +236,16 @@ function render() {
 
 function show(html) {
   modal.innerHTML = html;
+  // Focus a non-interactive heading, not the close button or an input.
+  // Keep visible keyboard focus for normal navigation.
+  const heading = modal.querySelector('h2');
+  if (heading) {
+    heading.tabIndex = -1;
+    heading.setAttribute('autofocus', '');
+    heading.classList.add('modal-focus-heading');
+  }
   if (!modal.open) modal.showModal();
+  if (heading && document.activeElement !== heading) heading.focus({ preventScroll: true });
 }
 
 function form(t = null, start = 'expense') {
