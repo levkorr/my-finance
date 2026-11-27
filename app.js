@@ -1,5 +1,21 @@
 'use strict';
 
+// iOS Safari may ignore viewport zoom limits. Block WebKit's page zoom
+// gestures as well, without cancelling single-finger scrolling or swipes.
+const preventPageZoom = event => {
+  if (event.cancelable) event.preventDefault();
+};
+for (const name of ['gesturestart', 'gesturechange']) {
+  document.addEventListener(name, preventPageZoom, { passive: false });
+}
+for (const name of ['touchstart', 'touchmove']) {
+  document.addEventListener(name, event => {
+    if (event.touches.length > 1) preventPageZoom(event);
+  }, { passive: false });
+}
+document.addEventListener('dblclick', preventPageZoom, { passive: false });
+
+
 const $ = s => document.querySelector(s);
 const main = $('#main');
 const modal = $('#modal');
@@ -234,8 +250,111 @@ function render() {
   }
 }
 
+// The entry popup morphs from the actual button position to a centered floating card.
+let entryOrigin = null, sheetMotion = null, sheetClosing = false;
+let entryTop = null;
+function layoutEntryPopup() {
+  if (entryTop === null || !modal.open || sheetClosing) return;
+  const viewport = window.visualViewport;
+  const y = viewport?.offsetTop || 0;
+  const h = viewport?.height || window.innerHeight;
+  // Keep the initial top unless the visible viewport shrinks (keyboard/rotation).
+  const gap = Math.min(24, h / 12);
+  const top = Math.max(y + gap, Math.min(entryTop, y + h - gap - Math.min(240, h * .7)));
+  modal.style.setProperty('--entry-top', `${top}px`);
+  modal.style.setProperty('--entry-room', `${Math.max(1, y + h - gap - top)}px`);
+  modal.classList.add('entry-anchored');
+}
+function clearEntryAnchor() {
+  entryTop = null;
+  modal.classList.remove('entry-anchored');
+  modal.style.removeProperty('--entry-top');
+  modal.style.removeProperty('--entry-room');
+}
+window.addEventListener('resize', layoutEntryPopup);
+window.visualViewport?.addEventListener('resize', layoutEntryPopup);
+window.visualViewport?.addEventListener('scroll', layoutEntryPopup);
+const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+function sourceButton() {
+  return entryOrigin && document.querySelector(entryOrigin.selector);
+}
+function originFrame() {
+  const source = sourceButton();
+  const r = source?.getBoundingClientRect() || entryOrigin?.rect;
+  const w = modal.offsetWidth, h = modal.offsetHeight;
+  // offsetLeft/Top are not reliable for top-layer dialogs; measure untransformed.
+  const previous = modal.style.transform;
+  modal.style.transform = 'none';
+  const m = modal.getBoundingClientRect();
+  modal.style.transform = previous;
+  if (!r || !w || !h) return {transform:'scale(.12)',borderRadius:'50%',backgroundColor:'var(--blue)'};
+  const dx = r.left+r.width/2-m.left-m.width/2;
+  const dy = r.top+r.height/2-m.top-m.height/2;
+  return {transform:`translate(${dx}px, ${dy}px) scale(${Math.max(.01,r.width/w)}, ${Math.max(.01,r.height/h)})`,borderRadius:'50%',backgroundColor:entryOrigin.round?'var(--blue)':'var(--card)'};
+}
+function restingFrame() {
+  return {transform:'none',borderRadius:'28px',backgroundColor:'var(--card)'};
+}
+function stopSheetMotion() {
+  if (sheetMotion) { sheetMotion.cancel(); sheetMotion = null; }
+}
+function openEntry(button) {
+  if (modal.open || sheetClosing) return;
+  const round = button.classList.contains('plus');
+  entryOrigin = {selector:round?'main .plus':'main [data-add="debt"]',rect:button.getBoundingClientRect(),round};
+  document.body.classList.add(round?'entry-from-plus':'entry-from-debt');
+  form(null, button.dataset.add || 'expense');
+}
+function animateEntryOpen() {
+  if (!entryOrigin || reducedMotion() || !modal.animate) return;
+  modal.classList.add('entry-opening');
+  const a = modal.animate([originFrame(),restingFrame()], {duration:360,easing:'cubic-bezier(.16,1,.3,1)'});
+  sheetMotion = a;
+  a.onfinish = () => {
+    if (sheetMotion === a) {sheetMotion = null; modal.classList.remove('entry-opening');}
+  };
+}
+function finishModalClose() {
+  stopSheetMotion();
+  modal.classList.remove('entry-opening','entry-closing');
+  if (modal.open) modal.close();
+  clearEntryAnchor();
+  document.body.classList.remove('entry-from-plus','entry-from-debt');
+  entryOrigin = null;
+  sheetClosing = false;
+}
+function closeModal() {
+  if (!modal.open || sheetClosing) return;
+  if (!entryOrigin || reducedMotion() || !modal.animate) { finishModalClose(); return; }
+  sheetClosing = true;
+  // Continue from the current frame if the user taps outside mid-opening.
+  const cs = getComputedStyle(modal);
+  const current = {transform:cs.transform,borderRadius:cs.borderRadius,backgroundColor:cs.backgroundColor};
+  stopSheetMotion();
+  modal.classList.remove('entry-opening');
+  modal.classList.add('entry-closing');
+  if (modal.contains(document.activeElement)) document.activeElement.blur();
+  const a = modal.animate([current,originFrame()], {duration:270,easing:'cubic-bezier(.4,0,.6,1)',fill:'forwards'});
+  sheetMotion = a;
+  a.onfinish = finishModalClose;
+}
+// Native dialog retargets backdrop taps to itself. Check both ends of the
+// gesture so scrolling or dragging out of a field never dismisses the form.
+let backdropPressed = false;
+function outsideSheet(e) {
+  const r=modal.getBoundingClientRect();
+  return e.target===modal && (e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom);
+}
+modal.addEventListener('pointerdown',e=>{backdropPressed=outsideSheet(e);});
+modal.addEventListener('pointercancel',()=>{backdropPressed=false;});
+modal.addEventListener('click',e=>{
+  if (backdropPressed && outsideSheet(e)) closeModal();
+  backdropPressed=false;
+});
+modal.addEventListener('cancel',e=>{e.preventDefault();closeModal();});
+
 function show(html) {
-  modal.innerHTML = html;
+  modal.innerHTML = `<div class="modal-shell">${html}</div>`;
   // Focus a non-interactive heading, not the close button or an input.
   // Keep visible keyboard focus for normal navigation.
   const heading = modal.querySelector('h2');
@@ -244,8 +363,18 @@ function show(html) {
     heading.setAttribute('autofocus', '');
     heading.classList.add('modal-focus-heading');
   }
-  if (!modal.open) modal.showModal();
+  const opening = !modal.open;
+  if (opening) {
+    modal.showModal();
+    if (entryOrigin) {
+      // The first form opens centered. Subsequent redraws retain its top edge.
+      entryTop = modal.getBoundingClientRect().top;
+      layoutEntryPopup();
+    }
+  }
+  if (entryTop !== null) modal.scrollTop = 0;
   if (heading && document.activeElement !== heading) heading.focus({ preventScroll: true });
+  if (opening) animateEntryOpen();
 }
 
 function form(t = null, start = 'expense') {
@@ -269,7 +398,7 @@ function form(t = null, start = 'expense') {
 
   function draw() {
     const cats = state.categories.filter(c => c.enabled || c.id === draft.category);
-    show(`<div class="row"><h2>${t ? 'Редактировать' : 'Новая операция'}</h2><button data-close>✕</button></div><div class="segments" id="types">${Object.entries(types).map(([k, n]) => `<button type="button" data-type="${k}" ${t && k !== type ? 'disabled' : ''} class="${k === type ? 'active' : ''}">${n}</button>`).join('')}</div><form id="entry"><label>Сумма</label><input class="amount" name="amount" inputmode="decimal" placeholder="0" value="${esc(draft.amount)}" required><label>Дата</label><input type="date" name="date" value="${esc(draft.date)}" required>${type === 'expense' ? `<label>Категория</label><select name="category"><option value="">📁 Без категории</option>${cats.map(c => categoryOption(c, c.id === draft.category)).join('')}</select>` : type === 'debt' ? `<label>Направление</label><select name="direction"><option value="given" ${draft.direction === 'given' ? 'selected' : ''}>Я дал в долг</option><option value="taken" ${draft.direction === 'taken' ? 'selected' : ''}>Я взял в долг</option></select><label>Имя человека</label><input name="person" value="${esc(draft.person)}" required><label>Срок возврата (необязательно)</label><input type="date" name="due" value="${esc(draft.due)}">` : `<label>Источник дохода</label><input name="person" value="${esc(draft.person)}" placeholder="Зарплата, стипендия…">`}<label>Комментарий</label><input name="note" value="${esc(draft.note)}" placeholder="Например: обед, поездка, подписка"><div style="margin-top:20px"><button class="primary">Сохранить</button></div></form>`);
+    show(`<div class="row"><h2>${t ? 'Редактировать' : 'Новая операция'}</h2><button data-close class="modal-close" aria-label="Закрыть">✕</button></div><div class="segments" id="types">${Object.entries(types).map(([k, n]) => `<button type="button" data-type="${k}" ${t && k !== type ? 'disabled' : ''} class="${k === type ? 'active' : ''}">${n}</button>`).join('')}</div><form id="entry"><label>Сумма</label><input class="amount" name="amount" inputmode="decimal" placeholder="0" value="${esc(draft.amount)}" required><label>Дата</label><input type="date" name="date" value="${esc(draft.date)}" required>${type === 'expense' ? `<label>Категория</label><select name="category"><option value="">📁 Без категории</option>${cats.map(c => categoryOption(c, c.id === draft.category)).join('')}</select>` : type === 'debt' ? `<label>Направление</label><select name="direction"><option value="given" ${draft.direction === 'given' ? 'selected' : ''}>Я дал в долг</option><option value="taken" ${draft.direction === 'taken' ? 'selected' : ''}>Я взял в долг</option></select><label>Имя человека</label><input name="person" value="${esc(draft.person)}" required><label>Срок возврата (необязательно)</label><input type="date" name="due" value="${esc(draft.due)}">` : `<label>Источник дохода</label><input name="person" value="${esc(draft.person)}" placeholder="Зарплата, стипендия…">`}<label>Комментарий</label><input name="note" value="${esc(draft.note)}" placeholder="Например: обед, поездка, подписка"><div style="margin-top:20px"><button class="primary">Сохранить</button></div></form>`);
 
     function switchType(k) {
       if (t || k === type) return;
@@ -321,7 +450,7 @@ function form(t = null, start = 'expense') {
         const i = s.transactions.findIndex(v => v.id === obj.id);
         if (i < 0) s.transactions.push(obj);
         else s.transactions[i] = obj;
-      })) modal.close();
+      })) closeModal();
     };
   }
 
@@ -337,7 +466,7 @@ function detail(id) {
     ? `<p class="${remain(t) === 0 ? 'positive' : 'muted'}"><strong>${remain(t) === 0 ? 'Скомпенсировано' : 'Частично возмещено'}</strong></p>` : '';
   const pendingControl = t.type === 'expense' && remain(t) > 0
     ? `<div class="comp-expect">${pending ? `<p class="comp-pending">Ожидается компенсация: <strong>${money(remain(t))}</strong></p>` : ''}<button type="button" class="comp-toggle" data-expect aria-pressed="${pending}">${pending ? 'Отменить ожидание компенсации' : 'Должны скомпенсировать'}</button><small>Расход уменьшится только после фактического возврата денег.</small></div>` : '';
-  show(`<div class="row"><h2>${esc(types[t.type])}</h2><button data-close>✕</button></div><div class="hero"><small>${esc(title)}</small><div class="total">${money(t.amount)}</div><small>${datefmt(t.date)}</small></div>${t.type === 'expense' ? `<p>Категория: <strong>${esc(catDisplay(t))}</strong></p>` : ''}${t.note && t.type !== 'expense' ? `<p class="wrap">${esc(t.note)}</p>` : ''}${t.type === 'debt' ? `<p>Срок возврата: ${datefmt(t.due)}</p><p>${t.direction === 'given' ? 'Мне должны' : 'Я должен'}</p>` : ''}${compensationStatus}${pendingControl}${t.type !== 'income' ? `<p>Возвращено: ${money(rep(t))}</p><p><strong>Остаток: ${money(remain(t))}</strong></p>${(t.adjustments || []).map(a => `<div class="row"><small>${datefmt(a.date)} · ${money(a.amount)}</small><button data-undo="${esc(a.id)}">Отменить</button></div>`).join('')}${remain(t) ? `<button class="primary" data-full>${t.type === 'expense' ? 'Скомпенсировано' : 'Долг возвращён'}</button><button data-partial style="width:100%">Частичный возврат</button>` : ''}` : ''}<div class="actions"><button data-edit>Редактировать</button><button class="danger" data-delete>Удалить</button></div>`);
+  show(`<div class="row"><h2>${esc(types[t.type])}</h2><button data-close class="modal-close" aria-label="Закрыть">✕</button></div><div class="hero"><small>${esc(title)}</small><div class="total">${money(t.amount)}</div><small>${datefmt(t.date)}</small></div>${t.type === 'expense' ? `<p>Категория: <strong>${esc(catDisplay(t))}</strong></p>` : ''}${t.note && t.type !== 'expense' ? `<p class="wrap">${esc(t.note)}</p>` : ''}${t.type === 'debt' ? `<p>Срок возврата: ${datefmt(t.due)}</p><p>${t.direction === 'given' ? 'Мне должны' : 'Я должен'}</p>` : ''}${compensationStatus}${pendingControl}${t.type !== 'income' ? `<p>Возвращено: ${money(rep(t))}</p><p><strong>Остаток: ${money(remain(t))}</strong></p>${(t.adjustments || []).map(a => `<div class="row"><small>${datefmt(a.date)} · ${money(a.amount)}</small><button data-undo="${esc(a.id)}">Отменить</button></div>`).join('')}${remain(t) ? `<button class="primary" data-full>${t.type === 'expense' ? 'Скомпенсировано' : 'Долг возвращён'}</button><button data-partial style="width:100%">Частичный возврат</button>` : ''}` : ''}<div class="actions"><button data-edit>Редактировать</button><button class="danger" data-delete>Удалить</button></div>`);
 
   const expect = modal.querySelector('[data-expect]');
   if (expect) expect.onclick = async () => {
@@ -352,7 +481,7 @@ function detail(id) {
   if (part) part.onclick = () => adjust(t, false);
   modal.querySelector('[data-edit]').onclick = () => form(t);
   modal.querySelector('[data-delete]').onclick = async () => {
-    if (confirm('Удалить операцию и историю возвратов?') && await change(s => s.transactions = s.transactions.filter(x => x.id !== id))) modal.close();
+    if (confirm('Удалить операцию и историю возвратов?') && await change(s => s.transactions = s.transactions.filter(x => x.id !== id))) closeModal();
   };
   modal.querySelectorAll('[data-undo]').forEach(b => b.onclick = async () => {
     if (confirm('Отменить этот возврат?') && await change(s => {
@@ -363,7 +492,7 @@ function detail(id) {
 }
 
 function adjust(t, full) {
-  show(`<div class="row"><h2>${t.type === 'expense' ? 'Компенсация' : 'Возврат долга'}</h2><button data-close>✕</button></div><form id="adjust"><label>Сумма</label><input name="amount" inputmode="decimal" value="${full ? remain(t) / 100 : ''}" required><label>Дата возврата</label><input name="date" type="date" value="${today()}" required><button class="primary" style="margin-top:18px">Подтвердить</button></form><button id="back">Назад</button>`);
+  show(`<div class="row"><h2>${t.type === 'expense' ? 'Компенсация' : 'Возврат долга'}</h2><button data-close class="modal-close" aria-label="Закрыть">✕</button></div><form id="adjust"><label>Сумма</label><input name="amount" inputmode="decimal" value="${full ? remain(t) / 100 : ''}" required><label>Дата возврата</label><input name="date" type="date" value="${today()}" required><button class="primary" style="margin-top:18px">Подтвердить</button></form><button id="back">Назад</button>`);
   $('#back').onclick = () => detail(t.id);
   $('#adjust').onsubmit = async e => {
     e.preventDefault();
@@ -385,7 +514,7 @@ function iconPicker(current) {
 function category(id) {
   const c = state.categories.find(x => x.id === id);
   let chosenIcon = c?.icon || '📁';
-  show(`<div class="row"><h2>${c ? 'Редактировать категорию' : 'Новая категория'}</h2><button data-close>✕</button></div><form id="category"><label>Название</label><input name="name" value="${esc(c?.name || '')}" maxlength="60" required><label>Иконка</label><div id="currentIcon" class="notice" style="margin-bottom:8px">Выбрано: <strong>${esc(chosenIcon)}</strong></div>${iconPicker(chosenIcon)}<input type="hidden" name="icon" value="${esc(chosenIcon)}"><div class="actions"><button class="primary">Сохранить</button>${c ? '<button type="button" class="danger" id="deleteCategory">Удалить категорию</button>' : ''}</div></form><p class="notice">Если удалить категорию, старые траты останутся в истории как «Без категории».</p>`);
+  show(`<div class="row"><h2>${c ? 'Редактировать категорию' : 'Новая категория'}</h2><button data-close class="modal-close" aria-label="Закрыть">✕</button></div><form id="category"><label>Название</label><input name="name" value="${esc(c?.name || '')}" maxlength="60" required><label>Иконка</label><div id="currentIcon" class="notice" style="margin-bottom:8px">Выбрано: <strong>${esc(chosenIcon)}</strong></div>${iconPicker(chosenIcon)}<input type="hidden" name="icon" value="${esc(chosenIcon)}"><div class="actions"><button class="primary">Сохранить</button>${c ? '<button type="button" class="danger" id="deleteCategory">Удалить категорию</button>' : ''}</div></form><p class="notice">Если удалить категорию, старые траты останутся в истории как «Без категории».</p>`);
 
   modal.querySelectorAll('[data-icon]').forEach(b => b.onclick = () => {
     chosenIcon = b.dataset.icon;
@@ -401,7 +530,7 @@ function category(id) {
       if (await change(s => {
         s.categories = s.categories.filter(x => x.id !== id);
         s.transactions.forEach(t => { if (t.category === id) t.category = ''; });
-      })) modal.close();
+      })) closeModal();
     };
   }
 
@@ -422,7 +551,7 @@ function category(id) {
       } else {
         s.categories.push({ id: uid(), name, icon, enabled: true });
       }
-    })) modal.close();
+    })) closeModal();
   };
 }
 
@@ -469,12 +598,13 @@ function validate(s) {
 }
 
 document.addEventListener('click', e => {
+  if (sheetClosing) return;
   const b = e.target.closest('button');
   if (!b) return;
   const d = b.dataset;
-  if ('close' in d) modal.close();
+  if ('close' in d) closeModal();
   if (d.tab) { tab = d.tab; render(); }
-  if ('add' in d) form(null, d.add || 'expense');
+  if ('add' in d) openEntry(b);
   if (d.detail) detail(d.detail);
   if ('newcat' in d) category();
   if (d.rename) category(d.rename);
