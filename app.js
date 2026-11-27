@@ -43,7 +43,7 @@ const initial = () => ({
   transactions: []
 });
 
-let db, state, tab = 'home', period = 'month', busy = false;
+let db, state, tab = 'home', busy = false;
 
 const money = n => new Intl.NumberFormat('ru-RU', { style: 'currency', currency: state.currency, maximumFractionDigits: 2 }).format(n / 100);
 const cents = v => Math.round(Number(String(v).replace(',', '.')) * 100);
@@ -154,7 +154,7 @@ function expenseTitle(t) {
   return t.note ? `${catDisplay(t)} — ${t.note}` : catDisplay(t);
 }
 
-function item(t, grouped = false) {
+function item(t, grouped = false, displayAmount = undefined) {
   const label = t.type === 'expense' ? expenseTitle(t) : (t.person || types[t.type]);
   const status = t.type === 'debt'
     ? (remain(t) === 0 ? 'Закрыт' : t.direction === 'given' ? 'Мне должны' : 'Я должен') + (t.due && remain(t) > 0 ? ' · до ' + datefmt(t.due) : '')
@@ -165,7 +165,7 @@ function item(t, grouped = false) {
   const compensated = t.type === 'expense' && rep(t) > 0 && remain(t) === 0;
   const sub = [grouped === true ? '' : datefmt(t.date), status].filter(Boolean).join(' · ');
   const sign = t.type === 'expense' || (t.type === 'debt' && t.direction === 'given') ? '−' : '+';
-  return `<button class="item" data-detail="${esc(t.id)}"><span class="wrap"><strong>${esc(label)}</strong>${sub ? `<small class="${compensated ? 'positive' : ''}">${esc(sub)}</small>` : ''}</span><strong class="item-amount ${sign === '+' ? 'positive' : ''}">${sign}${money(t.type === 'income' ? t.amount : remain(t))}</strong></button>`;
+  return `<button class="item" data-detail="${esc(t.id)}"><span class="wrap"><strong>${esc(label)}</strong>${sub ? `<small class="${compensated ? 'positive' : ''}">${esc(sub)}</small>` : ''}</span><strong class="item-amount ${sign === '+' ? 'positive' : ''}">${sign}${money(displayAmount ?? (t.type === 'income' ? t.amount : remain(t)))}</strong></button>`;
 }
 
 function dayTitle(date) {
@@ -187,16 +187,90 @@ function dailyOperations(ts) {
   }).join('');
 }
 
-function inPeriod(d) {
-  const now = today();
-  if (period === 'all') return true;
-  if (period === 'month') return d.slice(0, 7) === now.slice(0, 7);
-  if (period === 'year') return d.slice(0, 4) === now.slice(0, 4);
-  if (period === 'day') return d === now;
-  const start = new Date(now + 'T12:00:00');
-  start.setDate(start.getDate() - 6);
-  const s = start.getFullYear() + '-' + String(start.getMonth() + 1).padStart(2, '0') + '-' + String(start.getDate()).padStart(2, '0');
-  return d >= s && d <= now;
+// Statistics are grouped by the original purchase date, including later refunds.
+let statsMonth = today().slice(0, 7), statsMode = 'net';
+const statsColors = ['#3478f6','#34c759','#ff9500','#af52de','#ff6482','#5ac8fa','#a2845e','#8e8e93','#ffcc00','#5856d6','#00c7be','#ff453a'];
+const statsNamedColors = new Map([['еда','#3478f6'],['авто','#ff9500'],['другое','#af52de'],['одежда','#ff6482'],['транспорт','#34c759'],['переводы','#5ac8fa'],['наличные','#a2845e']]);
+const statMonthName = m => {
+  const label = new Intl.DateTimeFormat('ru-RU', {month:'long',year:'numeric'}).format(new Date(m+'-01T12:00:00')).replace(/\s*г\.?$/, '');
+  return label.charAt(0).toUpperCase()+label.slice(1);
+};
+function shiftMonth(m, delta) {
+  const [y,n] = m.split('-').map(Number);
+  const d = new Date(y,n-1+delta,1,12);
+  return String(d.getFullYear()).padStart(4,'0')+'-'+String(d.getMonth()+1).padStart(2,'0');
+}
+function statMonths() {
+  const keys = [today().slice(0,7), statsMonth, ...state.transactions.map(t=>t.date.slice(0,7))].sort();
+  const result=[];
+  for (let m=keys[0];m<=keys[keys.length-1];m=shiftMonth(m,1)) result.push(m);
+  return result;
+}
+const statValue = t => statsMode==='gross' ? t.amount : remain(t);
+const statCatKey = t => catObj(t)?.id || '';
+function monthlyStats(month, transactions=state.transactions, mode=statsMode) {
+  const [y,m] = month.split('-').map(Number);
+  const count = new Date(y,m,0,12).getDate();
+  const days = Array(count).fill(0), groups = new Map();
+  let gross=0, refunded=0, income=0, pending=0;
+  for(const t of transactions) {
+    if(t.date.slice(0,7)!==month) continue;
+    if(t.type==='income') { income+=t.amount; continue; }
+    if(t.type!=='expense') continue;
+    gross+=t.amount; refunded+=rep(t);
+    if(awaitingCompensation(t)) pending+=remain(t);
+    const value=mode==='gross'?t.amount:remain(t);
+    days[Number(t.date.slice(8,10))-1]+=value;
+    const key=statCatKey(t);
+    if(!groups.has(key)) {
+      const index=state.categories.findIndex(c=>c.id===key);
+      groups.set(key,{key,name:catName(t),icon:catIcon(t),color:statsNamedColors.get(catName(t).toLowerCase())||statsColors[(index<0?7:index)%statsColors.length],value:0});
+    }
+    groups.get(key).value+=value;
+  }
+  const net=gross-refunded, total=mode==='gross'?gross:net;
+  const categories=[...groups.values()].filter(c=>c.value>0).sort((a,b)=>b.value-a.value||a.name.localeCompare(b.name,'ru'));
+  const now=today();
+  const elapsed=month===now.slice(0,7)?Math.max(Number(now.slice(8)),...days.map((v,i)=>v>0?i+1:0)):count;
+  return {gross,refunded,income,pending,net,total,days,categories,elapsed};
+}
+function statsDonut(s) {
+  const r=94, circumference=2*Math.PI*r;
+  let offset=0;
+  const arcs=s.categories.map((c,i)=>{
+    const len=c.value/s.total*circumference;
+    const gap=s.categories.length===1?0:Math.min(3,len*.22);
+    const arc=`<circle class="stats-arc" data-stats-cat="${esc(c.key)}" cx="120" cy="120" r="${r}" fill="none" stroke="${c.color}" stroke-width="23" stroke-dasharray="${Math.max(0,len-gap)} ${circumference}" stroke-dashoffset="${-offset-gap/2}" transform="rotate(-90 120 120)"><title>${esc(c.name)}: ${esc(money(c.value))}</title></circle>`;
+    offset+=len; return arc;
+  }).join('');
+  const legend=s.categories.map(c=>`<button class="stats-category" data-stats-cat="${esc(c.key)}"><span class="stats-dot" style="background:${c.color}"></span><span class="stats-cat-name">${esc(c.icon)} ${esc(c.name)}</span><small>${(100*c.value/s.total).toLocaleString('ru-RU',{maximumFractionDigits:1})}%</small><strong>${money(c.value)}</strong></button>`).join('');
+  return `<div class="stats-donut"><svg viewBox="0 0 240 240" aria-hidden="true"><circle cx="120" cy="120" r="${r}" fill="none" stroke="var(--bg)" stroke-width="23"/>${arcs}</svg><div class="stats-donut-center"><small>Всего</small><strong>${money(s.total)}</strong><small>${s.total?'100%':'0%'}</small></div></div>${legend||'<div class="empty">Нет расходов за месяц</div>'}`;
+}
+function statsAxis(n) {
+  if(n>=100000) return (n/100000).toLocaleString('ru-RU',{maximumFractionDigits:1})+'к';
+  return (n/100).toLocaleString('ru-RU',{maximumFractionDigits:2});
+}
+function statsBars(s) {
+  const highest=Math.max(0,...s.days), raw=Math.max(100,highest/4), magnitude=10**Math.floor(Math.log10(raw));
+  const step=([1,2,2.5,5,10].find(v=>v*magnitude>=raw)||10)*magnitude, max=step*4;
+  const grid=Array.from({length:5},(_,i)=>`<div class="stats-gridline" style="top:${i*25}%"><small>${statsAxis(max-i*step)}</small></div>`).join('');
+  const bars=s.days.map((value,i)=>`<button class="stats-day ${value?'':'stats-zero'}" data-stats-day="${i+1}" aria-label="${i+1} число: ${esc(money(value))}" title="${i+1} число: ${esc(money(value))}"><span class="stats-column" style="height:${value/max*100}%"></span>${i===0||(i+1)%5===0||(i+1===s.days.length && i%5>=2)?`<small class="stats-day-label">${i+1}</small>`:''}</button>`).join('');
+  return `<div class="stats-plot"><div class="stats-gridlines">${grid}</div><div class="stats-columns" style="grid-template-columns:repeat(${s.days.length},minmax(0,1fr))">${bars}</div></div><div class="stats-metrics"><div><small>Среднее за день</small><strong>${money(Math.round(s.total/s.elapsed))}</strong></div><div><small>Максимум за день</small><strong>${money(highest)}</strong></div></div>`;
+}
+function renderStats() {
+  const months=statMonths(), s=monthlyStats(statsMonth);
+  const arrow=direction=>outlineIcon(direction<0?'<path d="m15 5-7 7 7 7"/>':'<path d="m9 5 7 7-7 7"/>','stats-arrow-icon');
+  main.innerHTML=`<h1>Статистика</h1><div class="card stats-month"><button data-stats-shift="-1" aria-label="Предыдущий месяц" ${statsMonth===months[0]?'disabled':''}>${arrow(-1)}</button><select id="stats-month" aria-label="Выбрать месяц">${months.map(m=>`<option value="${m}" ${m===statsMonth?'selected':''}>${esc(statMonthName(m))}</option>`).join('')}</select><button data-stats-shift="1" aria-label="Следующий месяц" ${statsMonth===months[months.length-1]?'disabled':''}>${arrow(1)}</button></div>
+    <div class="card stats-summary"><div class="stats-summary-hero"><small>Чистые расходы</small><div class="total" id="stats-net">${money(s.net)}</div></div><div class="stats-summary-rows"><div><span>Всего потрачено</span><strong>${money(s.gross)}</strong></div><div><span>Скомпенсировано</span><strong class="positive">${money(s.refunded)}</strong></div><div><span>Доходы</span><strong class="positive">${money(s.income)}</strong></div><div><span>Должны скомпенсировать</span><strong class="stats-pending">${money(s.pending)}</strong></div></div></div>
+    <div class="segments stats-mode" aria-label="Учёт компенсаций">${[['gross','Все расходы'],['net','Чистые расходы']].map(([v,n])=>`<button data-stats-mode="${v}" aria-pressed="${statsMode===v}" class="${statsMode===v?'active':''}">${n}</button>`).join('')}</div>
+    <h2>Расходы по категориям</h2><div class="card stats-categories">${statsDonut(s)}</div>
+    <h2>Расходы по дням</h2><div class="card stats-daily">${statsBars(s)}</div>`;
+}
+function statsDrilldown(kind,key) {
+  const entries=state.transactions.filter(t=>t.type==='expense'&&t.date.slice(0,7)===statsMonth&&(kind==='day'?Number(t.date.slice(8,10))===Number(key):statCatKey(t)===key)).sort((a,b)=>b.date.localeCompare(a.date)||b.created-a.created);
+  const title=kind==='day'?dayTitle(statsMonth+'-'+String(key).padStart(2,'0')):entries.length?catDisplay(entries[0]):'Без категории';
+  const sum=entries.reduce((v,t)=>v+statValue(t),0);
+  show(`<div class="row"><h2>${esc(title)}</h2><button data-close class="modal-close" aria-label="Закрыть">✕</button></div><div class="stats-summary-hero"><small>${esc(statMonthName(statsMonth))} · ${statsMode==='net'?'Чистые расходы':'Все расходы'}</small><div class="total">${money(sum)}</div></div><div>${entries.map(t=>item(t,kind==='day',statValue(t))).join('')||'<div class="empty">Нет расходов за день</div>'}</div>`);
 }
 
 function totals(filter) {
@@ -235,15 +309,7 @@ function render() {
       `<h2>Должны скомпенсировать · ${money(pendingTotal)}</h2><div class="card">${pending.map(t => item(t)).join('') || '<div class="empty">Нет ожидаемых компенсаций</div>'}</div><h2>Закрытые</h2><div class="card">${debts.filter(t => !remain(t)).map(item).join('') || '<div class="empty">Нет закрытых долгов</div>'}</div>`;
   }
 
-  if (tab === 'stats') {
-    const { exp, comp, inc } = totals(inPeriod);
-    const by = Object.create(null);
-    for (const t of ts.filter(t => t.type === 'expense' && inPeriod(t.date))) {
-      const key = catDisplay(t);
-      by[key] = (by[key] || 0) + t.amount;
-    }
-    main.innerHTML = `<h1>Статистика</h1><select id="period">${[['day', 'Сегодня'], ['week', 'Последние 7 дней'], ['month', 'Этот месяц'], ['year', 'Этот год'], ['all', 'Всё время']].map(([v, n]) => `<option value="${v}" ${period === v ? 'selected' : ''}>${n}</option>`).join('')}</select><div class="card"><small>Чистые расходы</small><div class="total">${money(exp - comp)}</div><p>Потрачено: ${money(exp)}</p><p class="positive">Возмещено: ${money(comp)}</p><p>Доходы: ${money(inc)}</p></div><h2>Расходы по категориям до компенсаций</h2><div class="card">${Object.entries(by).sort((a, b) => b[1] - a[1]).map(([n, v]) => `<div class="row"><span>${esc(n)}</span><strong>${money(v)}</strong></div><div class="bar"><i style="width:${exp ? v / exp * 100 : 0}%"></i></div>`).join('') || '<div class="empty">Нет расходов</div>'}</div><p class="notice">Компенсации учитываются по дате фактического возврата. Долги не входят в доходы и расходы.</p>`;
-  }
+  if (tab === 'stats') renderStats();
 
   if (tab === 'settings') {
     main.innerHTML = `<h1>Настройки</h1><h2>Категории расходов</h2><div class="card">${state.categories.map(c => `<div class="row" style="margin:8px 0"><button data-rename="${esc(c.id)}" style="text-align:left;flex:1;color:var(--text)">${esc(c.icon)} ${esc(c.name)} ✎</button><input aria-label="Показывать ${esc(c.name)}" type="checkbox" data-cat="${esc(c.id)}" ${c.enabled ? 'checked' : ''}></div>`).join('')}<button data-newcat>+ Создать категорию</button><p class="notice">Можешь задать свою иконку для каждой категории. Скрытые категории сохраняются в истории.</p></div><h2>Валюта</h2><div class="card"><select id="currency">${['RUB', 'USD', 'EUR', 'MDL', 'EGP', 'KZT', 'BYN', 'UAH'].map(c => `<option ${c === state.currency ? 'selected' : ''}>${c}</option>`).join('')}</select><p class="notice">Меняет обозначение валюты, не конвертирует суммы.</p></div><h2>Резервные копии</h2><div class="card"><button data-export>Экспорт JSON</button><button data-csv>Экспорт CSV</button><button data-import>Импорт JSON</button><input type="file" id="importfile" accept=".json,application/json" hidden><p class="notice">Данные хранятся на этом устройстве. Регулярно сохраняй резервную копию в «Файлы».</p></div>`;
@@ -599,11 +665,16 @@ function validate(s) {
 
 document.addEventListener('click', e => {
   if (sheetClosing) return;
+  const categoryTarget = e.target.closest('[data-stats-cat]');
+  if (categoryTarget) { statsDrilldown('category',categoryTarget.dataset.statsCat); return; }
   const b = e.target.closest('button');
   if (!b) return;
   const d = b.dataset;
   if ('close' in d) closeModal();
   if (d.tab) { tab = d.tab; render(); }
+  if (d.statsShift) { const m=shiftMonth(statsMonth,Number(d.statsShift)); if(statMonths().includes(m)){statsMonth=m;renderStats();} }
+  if (d.statsMode && ['net','gross'].includes(d.statsMode)) { statsMode=d.statsMode;renderStats(); }
+  if (d.statsDay) statsDrilldown('day',d.statsDay);
   if ('add' in d) openEntry(b);
   if (d.detail) detail(d.detail);
   if ('newcat' in d) category();
@@ -615,7 +686,7 @@ document.addEventListener('click', e => {
 
 document.addEventListener('change', async e => {
   const el = e.target;
-  if (el.id === 'period') { period = el.value; render(); }
+  if (el.id === 'stats-month' && statMonths().includes(el.value)) { statsMonth=el.value;renderStats(); }
   if (el.id === 'currency') {
     const value = el.value;
     if (confirm('Изменить обозначение валюты без пересчёта сумм?')) await change(s => s.currency = value);
